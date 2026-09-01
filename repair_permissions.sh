@@ -41,24 +41,29 @@ fi
 LIB_DIRS=(/lib /lib64 /usr/lib /usr/lib32 /usr/lib64 /usr/libexec /usr/local/lib)
 BIN_DIRS=(/bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin)
 
-# Binaries that need the setuid bit. Losing it breaks sudo (issue #22),
-# and losing sudo on a machine with root login disabled means console-only
-# recovery.
-declare -A SETUID_BINS=(
-    ["/usr/bin/sudo"]=4755
-    ["/usr/bin/su"]=4755
-    ["/usr/bin/passwd"]=4755
-    ["/usr/bin/chsh"]=4755
-    ["/usr/bin/chfn"]=4755
-    ["/usr/bin/newgrp"]=4755
-    ["/usr/bin/gpasswd"]=4755
-    ["/usr/bin/mount"]=4755
-    ["/usr/bin/umount"]=4755
-    ["/usr/bin/pkexec"]=4755
-    ["/usr/bin/fusermount3"]=4755
-    ["/usr/lib/dbus-1.0/dbus-daemon-launch-helper"]=4750
-    ["/usr/lib/openssh/ssh-keysign"]=4755
-    ["/usr/lib/polkit-1/polkit-agent-helper-1"]=4755
+# Binaries that need the setuid bit. Losing it breaks sudo (issue #22), and
+# losing sudo on a machine with root login disabled means console-only recovery.
+#
+# Deliberately NOT a table of expected modes: the exact mode is distro- and
+# version-specific (Debian 13 ships dbus-daemon-launch-helper 4754, not the
+# 4750 an earlier version of this script asserted), so a hardcoded table
+# produces false positives and then "repairs" correct files. The invariant
+# that actually matters is: setuid bit set, owned by root.
+SETUID_BINS=(
+    /usr/bin/sudo
+    /usr/bin/su
+    /usr/bin/passwd
+    /usr/bin/chsh
+    /usr/bin/chfn
+    /usr/bin/newgrp
+    /usr/bin/gpasswd
+    /usr/bin/mount
+    /usr/bin/umount
+    /usr/bin/pkexec
+    /usr/bin/fusermount3
+    /usr/lib/dbus-1.0/dbus-daemon-launch-helper
+    /usr/lib/openssh/ssh-keysign
+    /usr/lib/polkit-1/polkit-agent-helper-1
 )
 
 FOUND=0
@@ -151,24 +156,29 @@ echo ""
 echo -e "${BLUE}[3] Setuid binaries${NC}"
 echo "─────────────────────────────────────────────────"
 
-for bin in "${!SETUID_BINS[@]}"; do
+for bin in "${SETUID_BINS[@]}"; do
     [[ -f "${bin}" ]] || continue
 
-    want="${SETUID_BINS[${bin}]}"
     have=$(stat -c '%a' "${bin}" 2>/dev/null)
     owner=$(stat -c '%u' "${bin}" 2>/dev/null)
 
-    if [[ "${have}" == "${want}" ]] && [[ "${owner}" == "0" ]]; then
+    if [[ -u "${bin}" ]] && [[ "${owner}" == "0" ]]; then
         echo -e "  ${GREEN}✓${NC} ${bin} (${have})"
         continue
     fi
 
     FOUND=$((FOUND + 1))
-    echo -e "  ${RED}✗${NC} ${bin}: is ${have} uid ${owner}, should be ${want} uid 0"
+    if [[ ! -u "${bin}" ]]; then
+        echo -e "  ${RED}✗${NC} ${bin}: setuid bit missing (mode ${have})"
+    else
+        echo -e "  ${RED}✗${NC} ${bin}: owned by uid ${owner}, must be uid 0"
+    fi
 
     if ${APPLY}; then
-        chown root:root "${bin}" 2>/dev/null
-        chmod "${want}" "${bin}" 2>/dev/null
+        # Restore only the invariant. The group/other bits are handled by the
+        # o+rX passes above; do not overwrite a distro-specific mode.
+        chown root "${bin}" 2>/dev/null
+        chmod u+s "${bin}" 2>/dev/null
         FIXED=$((FIXED + 1))
         echo -e "      ${GREEN}repaired${NC}"
     fi

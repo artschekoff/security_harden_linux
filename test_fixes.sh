@@ -118,6 +118,27 @@ chmod o+rX "${TMP}/lib/libappstream.so.5"
 mode=$(stat -c '%a' "${TMP}/lib/libappstream.so.5" 2>/dev/null || stat -f '%Lp' "${TMP}/lib/libappstream.so.5")
 check "o+rX adds read only, no execute bit" "${mode}" "644"
 
+#-----------------------------------------------------------------------------
+echo "== setuid check is mode-agnostic =="
+#-----------------------------------------------------------------------------
+# Found on a real Debian 13 box: it ships dbus-daemon-launch-helper as 4754,
+# not the 4750 an earlier version of repair_permissions.sh asserted. A table of
+# expected modes flags correct files and then "repairs" them. Only the setuid
+# bit and root ownership are portable invariants.
+grep -qE '\]=4[0-9]{3}' repair_permissions.sh \
+    && bad "hardcoded setuid mode table is back" \
+    || ok "no hardcoded setuid mode table"
+
+grep -q '\[\[ -u "${bin}" \]\]' repair_permissions.sh \
+    && ok "setuid checked via -u, not an exact mode" \
+    || bad "setuid checked via -u, not an exact mode"
+
+printf 'x' > "${TMP}/setuid_bin"
+chmod 4754 "${TMP}/setuid_bin" 2>/dev/null
+[[ -u "${TMP}/setuid_bin" ]] && ok "4754 accepted as setuid" || bad "4754 accepted as setuid"
+chmod 0755 "${TMP}/setuid_bin"
+[[ -u "${TMP}/setuid_bin" ]] && bad "0755 wrongly accepted as setuid" || ok "0755 flagged as missing setuid"
+
 echo ""
 echo "passed: ${PASS}  failed: ${FAIL}"
 [[ ${FAIL} -eq 0 ]]
