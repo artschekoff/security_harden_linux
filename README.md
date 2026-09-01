@@ -1,9 +1,28 @@
-!!-- Consider this broken as of now it will be going an overhaul soon --!!
-!!-- DO NOT USE ON A PRODUCTION MACHINE --!!
+> **Fork notice.** This is a fork of
+> [captainzero93/security_harden_linux](https://github.com/captainzero93/security_harden_linux),
+> which upstream marked as broken pending an overhaul. This fork fixes the
+> open issues behind that warning. See [Fixes in this fork](#fixes-in-this-fork).
+>
+> **Still test in a VM or snapshot before touching a machine you care about.**
+> Hardening failures lock you out; that risk is inherent to the task, not to
+> this particular script.
 
 # FORTRESS.SH :: Debian Linux Defence Configuration
 
-NOTICE: Fix Permissions .sh was causing issues on some systems it's been removed for now, the newer versions should already have fixed the issues that script attempted to.
+NOTICE: `fix_permissions.sh` was removed upstream after it broke Debian 13
+systems. If a machine was already damaged by it, run
+`sudo ./repair_permissions.sh` to restore library and setuid permissions.
+
+## Fixes in this fork
+
+| Upstream issue | Problem | Fix |
+|---|---|---|
+| [#21](https://github.com/captainzero93/security_harden_linux/issues/21) | Runs reported success while `/etc/sysctl.d/99-fortress.conf` was never written | Modules are invoked as `if "${func}"`, which disables `errexit` for the whole function body — failing commands were stepped over and the trailing `return 0` reported success. `execute_command()` now counts failures and `execute_modules()` fails the module on a non-zero count. `module_sysctl()` additionally verifies the file landed. |
+| [#25](https://github.com/captainzero93/security_harden_linux/issues/25) | `aa-enforce /etc/apparmor.d/*` silently broke PHP-FPM and other services | Profiles the distro ships with `flags=(complain)` are left in complain mode and reported. Everything else still enforces. `verify_fortress.sh` now scans the kernel log for `apparmor="DENIED"` and names the affected profiles. |
+| [#22](https://github.com/captainzero93/security_harden_linux/issues/22), [#26](https://github.com/captainzero93/security_harden_linux/issues/26) | `fix_permissions.sh` stripped world read/execute, breaking Flatpak, `sudo`, and boot | New `repair_permissions.sh` restores `o+rX` on library and binary trees and resets setuid binaries. Reports by default; `--apply` to change anything. |
+| — | Permission checks passed as root while normal users were locked out | `verify_fortress.sh` resolves symlinks before checking modes and sweeps every `*.so*` for a missing world-read bit, instead of testing six hardcoded names with `-r` as root. |
+
+Run `./test_fixes.sh` to verify the fixes are in place.
 
 **One-command security hardening that implements enterprise-grade protections (DISA STIG + CIS) while letting you decide the level of protection vs usability trade-off. Casual desktop use through to strict server enforcement.**
 

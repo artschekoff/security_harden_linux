@@ -235,12 +235,15 @@ CRITICAL_LIBS=("libc.so.6" "libstdc++.so.6" "libm.so.6" "libpthread.so.0" "libdl
 for lib in "${CRITICAL_LIBS[@]}"; do
     FOUND=$(find /lib /usr/lib -name "$lib" 2>/dev/null | head -1)
     if [[ -n "$FOUND" ]]; then
-        if [[ -r "$FOUND" ]]; then
+        # Resolve the symlink: the link is always 0777, the target is what
+        # actually gets loaded. Checking the link told us nothing (issue #26).
+        TARGET=$(readlink -f "$FOUND" 2>/dev/null || echo "$FOUND")
+        if [[ -r "$TARGET" ]] && [[ -n "$(find "$TARGET" -perm -o+r 2>/dev/null)" ]]; then
             echo -e "  ${GREEN}✓${NC} $lib readable"
             PASSED=$((PASSED + 1))
         else
-            echo -e "  ${RED}✗${NC} $lib NOT readable"
-            echo "      Fix: sudo chmod 644 $FOUND"
+            echo -e "  ${RED}✗${NC} $lib NOT world-readable ($TARGET)"
+            echo "      Fix: sudo chmod 644 $TARGET"
             FAILED=$((FAILED + 1))
         fi
     else
@@ -248,6 +251,22 @@ for lib in "${CRITICAL_LIBS[@]}"; do
         WARNINGS=$((WARNINGS + 1))
     fi
 done
+
+# Issue #26: a single non-world-readable shared object anywhere in the library
+# path breaks apps for normal users while every root-run check still passes.
+# Sweep the whole tree rather than a hand-picked list of six names.
+echo "  Scanning all shared objects for lost read permission..."
+UNREADABLE=$(find /lib /usr/lib -name '*.so*' -type f ! -perm -o+r 2>/dev/null | head -20)
+if [[ -n "$UNREADABLE" ]]; then
+    COUNT=$(echo "$UNREADABLE" | wc -l)
+    echo -e "  ${RED}✗${NC} $COUNT+ shared object(s) not readable by normal users:"
+    echo "$UNREADABLE" | sed 's/^/        /'
+    echo "      Fix: sudo ./repair_permissions.sh"
+    FAILED=$((FAILED + 1))
+else
+    echo -e "  ${GREEN}✓${NC} All shared objects world-readable"
+    PASSED=$((PASSED + 1))
+fi
 
 echo ""
 
@@ -274,6 +293,21 @@ if command -v aa-status >/dev/null 2>&1; then
     else
         echo -e "  ${YELLOW}⚠${NC} AppArmor service not running"
         WARNINGS=$((WARNINGS + 1))
+    fi
+
+    # Issue #25: enforcing a profile that does not know an app's real paths
+    # fails silently -- the app just 500s. Surface the denials here.
+    DENIALS=$(journalctl -k --no-pager 2>/dev/null | grep 'apparmor="DENIED"' | tail -50 || true)
+    if [[ -n "$DENIALS" ]]; then
+        PROFILES_DENIED=$(echo "$DENIALS" | grep -oP 'profile="\K[^"]+' | sort -u | tr '\n' ' ')
+        echo -e "  ${RED}✗${NC} AppArmor denials found in kernel log"
+        echo "      Affected profiles: ${PROFILES_DENIED}"
+        echo "      Inspect: sudo journalctl -k | grep 'apparmor=\"DENIED\"'"
+        echo "      Relax one: sudo aa-complain /etc/apparmor.d/<profile> && sudo systemctl restart <service>"
+        FAILED=$((FAILED + 1))
+    else
+        echo -e "  ${GREEN}✓${NC} No AppArmor denials in kernel log"
+        PASSED=$((PASSED + 1))
     fi
 else
     echo -e "  ${CYAN}○${NC} AppArmor not installed"

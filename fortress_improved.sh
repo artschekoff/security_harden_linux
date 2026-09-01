@@ -118,6 +118,9 @@ declare -a DETECTED_VMS=()
 declare -a EXECUTED_MODULES=()
 declare -a FAILED_MODULES=()
 declare -a SKIPPED_MODULES=()
+# Failed commands within the module currently running. Reset per module by
+# execute_modules(); incremented by execute_command().
+declare -i MODULE_ERROR_COUNT=0
 declare -A MODULE_EXPLANATIONS=()
 
 # Color codes
@@ -318,7 +321,19 @@ execute_command() {
     fi
     
     log INFO "${description}"
-    eval "${command}"
+
+    # Modules are invoked as `if "${func}"`, which disables errexit for the
+    # entire function body. Before this, a failing command inside a module was
+    # silently stepped over and the module still returned 0 -- so the run
+    # reported success while leaving configs unwritten (upstream issue #21).
+    # Count failures explicitly so execute_modules() can see them.
+    local rc=0
+    eval "${command}" || rc=$?
+    if [[ ${rc} -ne 0 ]]; then
+        MODULE_ERROR_COUNT=$((MODULE_ERROR_COUNT + 1))
+        log ERROR "${description} - failed (exit ${rc})"
+    fi
+    return "${rc}"
 }
 
 wait_for_apt() {
@@ -1702,9 +1717,17 @@ EOF
             log INFO "Applied custom sysctl parameters from configuration"
         fi
         
+        # Issue #21: users reported "FORTRESS sysctl config not found" after a
+        # run that claimed success. Confirm the write instead of assuming it.
+        if [[ ! -s "${sysctl_conf}" ]]; then
+            MODULE_ERROR_COUNT=$((MODULE_ERROR_COUNT + 1))
+            log ERROR "Failed to write ${sysctl_conf} - kernel hardening NOT applied"
+            return 1
+        fi
+
         execute_command "Applying kernel parameters" \
             "${SUDO} sysctl -p ${sysctl_conf} 2>/dev/null || true"
-        
+
         log SUCCESS "Kernel security parameters configured"
         
         if [[ "${DOCKER_DETECTED}" == "true" ]] && [[ "${ALLOW_DOCKER_FORWARDING}" == "true" ]]; then
@@ -2145,10 +2168,42 @@ module_apparmor() {
         execute_command "Enabling AppArmor" \
             "${SUDO} systemctl enable apparmor && ${SUDO} systemctl start apparmor"
         
-        # Set all profiles to enforce mode
-        ${SUDO} aa-enforce /etc/apparmor.d/* 2>/dev/null || true
-        
-        log SUCCESS "AppArmor configured and enforcing"
+        # Set profiles to enforce mode.
+        #
+        # Upstream issue #25: `aa-enforce /etc/apparmor.d/*` enforced EVERY
+        # profile, including the ones the distro deliberately ships with
+        # `flags=(complain)`. Those are generic and do not know about
+        # application-specific paths, so enforcing them silently broke
+        # PHP-FPM, custom DB layouts, etc. Leave them in complain mode and
+        # tell the user they exist.
+        local profile
+        local -a complain_profiles=()
+        local enforced=0
+        for profile in /etc/apparmor.d/*; do
+            [[ -f "${profile}" ]] || continue
+            if grep -qE 'flags[[:space:]]*=[[:space:]]*\([^)]*complain' "${profile}"; then
+                complain_profiles+=("$(basename "${profile}")")
+                continue
+            fi
+            if ${SUDO} aa-enforce "${profile}" >/dev/null 2>&1; then
+                enforced=$((enforced + 1))
+            fi
+        done
+
+        log SUCCESS "AppArmor configured - ${enforced} profile(s) enforcing"
+
+        if [[ ${#complain_profiles[@]} -gt 0 ]]; then
+            log WARNING "Left ${#complain_profiles[@]} distro complain-mode profile(s) untouched:"
+            log WARNING "  ${complain_profiles[*]}"
+            log INFO "These ship as complain-mode on purpose - enforcing them breaks apps with non-standard paths."
+        fi
+
+        echo ""
+        echo "  If an app misbehaves after this, check for AppArmor denials:"
+        echo "    sudo journalctl -k | grep 'apparmor=\"DENIED\"'"
+        echo "    sudo aa-complain /etc/apparmor.d/<profile-name>"
+        echo "    sudo systemctl restart <service>"
+        echo ""
         
         if [[ "${VERBOSE}" == "true" ]]; then
             echo ""
@@ -2901,12 +2956,13 @@ execute_modules() {
 
         local func="module_${module}"
         if declare -f "${func}" > /dev/null; then
-            if "${func}"; then
+            MODULE_ERROR_COUNT=0
+            if "${func}" && [[ ${MODULE_ERROR_COUNT} -eq 0 ]]; then
                 EXECUTED_MODULES+=("${module}")
                 log SUCCESS "Module ${module} completed successfully"
             else
                 FAILED_MODULES+=("${module}")
-                log ERROR "Module ${module} failed"
+                log ERROR "Module ${module} failed (${MODULE_ERROR_COUNT} command(s) failed)"
 
                 if [[ "${INTERACTIVE}" == "true" ]]; then
                     read -p "Continue with remaining modules? (Y/n): " -r continue_exec
