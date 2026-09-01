@@ -89,9 +89,36 @@ grep -q 'if "${func}" && \[\[ ${MODULE_ERROR_COUNT} -eq 0 \]\]' fortress_improve
     && ok "execute_modules checks MODULE_ERROR_COUNT" \
     || bad "execute_modules checks MODULE_ERROR_COUNT"
 
-grep -q 'if \[\[ ! -s "${sysctl_conf}" \]\]' fortress_improved.sh \
-    && ok "module_sysctl verifies the file was written" \
-    || bad "module_sysctl verifies the file was written"
+# Every config heredoc must be guarded. A size-only check is not enough: a
+# re-run leaves the previous file in place, so a blocked write still looks
+# fine (reproduced with `chattr +i` on a live Debian 13 host).
+TEE_COUNT=$(grep -cE '\$\{SUDO\} tee "\$\{[A-Za-z_]+\}" > /dev/null <<' fortress_improved.sh)
+GUARD_COUNT=$(grep -c 'check_write "\$' fortress_improved.sh)
+check "every config write is guarded by check_write (report file excluded)" \
+      "${GUARD_COUNT}" "$((TEE_COUNT - 1))"
+
+grep -q 'local rc=$?' fortress_improved.sh \
+    && ok "check_write inspects tee exit status, not just file size" \
+    || bad "check_write inspects tee exit status, not just file size"
+
+# The helper must fail on a non-zero status even when the target file is
+# non-empty -- the exact case that slipped through on Debian 13.
+printf 'stale content' > "${TMP}/cfg"
+res=$(bash -c '
+    MODULE_ERROR_COUNT=0
+    log() { :; }
+    check_write() {
+        local rc=$?
+        local file="$1"
+        if [[ ${rc} -ne 0 ]] || [[ ! -s "${file}" ]]; then
+            MODULE_ERROR_COUNT=$((MODULE_ERROR_COUNT + 1)); return 1
+        fi
+        return 0
+    }
+    false
+    check_write "'"${TMP}"'/cfg" && echo WRONGLY_OK || echo CAUGHT
+')
+check "failed write over an existing file is caught" "${res}" "CAUGHT"
 
 #-----------------------------------------------------------------------------
 echo "== issue #26: non-world-readable libraries are detected =="

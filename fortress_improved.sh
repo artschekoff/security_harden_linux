@@ -336,6 +336,26 @@ execute_command() {
     return "${rc}"
 }
 
+# Call immediately after a `tee <file> <<EOF ... EOF` block.
+#
+# The heredoc config writes do not go through execute_command(), so a failed
+# write was invisible. Checking the file's size is NOT sufficient on its own:
+# a re-run leaves the previous run's content in place, so the file looks fine
+# while the new settings were never written. Found by forcing a write failure
+# with `chattr +i` on a live Debian 13 host -- the module still reported
+# success. Check tee's exit status; keep the size test for a truncating write.
+check_write() {
+    local rc=$?
+    local file="$1"
+
+    if [[ ${rc} -ne 0 ]] || [[ ! -s "${file}" ]]; then
+        MODULE_ERROR_COUNT=$((MODULE_ERROR_COUNT + 1))
+        log ERROR "Failed to write ${file} (exit ${rc}) - settings NOT applied"
+        return 1
+    fi
+    return 0
+}
+
 wait_for_apt() {
     local max_wait=300
     local waited=0
@@ -1244,6 +1264,7 @@ TCPKeepAlive yes
 Compression delayed
 Subsystem sftp ${sftp_server}
 EOF
+        check_write "${ssh_config}" || return 1
 
         # Add allowed users if configured
         if [[ -n "${SSH_ALLOWED_USERS:-}" ]]; then
@@ -1502,6 +1523,7 @@ if [[ -s "${REPORT}" ]]; then
     logger -t fortress "Package verification found ${ANOMALIES} anomalies - check ${REPORT}"
 fi
 CRONEOF
+        check_write "${cron_script}" || return 1
         
         ${SUDO} chmod +x "${cron_script}"
         log SUCCESS "Weekly package verification cron job created"
@@ -1708,6 +1730,7 @@ kernel.perf_event_paranoid = 3
 # 0 = classic, 1 = restricted (only parents/CAP_SYS_PTRACE), 2 = admin-only, 3 = none
 kernel.yama.ptrace_scope = 1
 EOF
+        check_write "${sysctl_conf}" || return 1
 
         # Apply custom sysctl parameters if configured
         if [[ -n "${SYSCTL_CUSTOM:-}" ]]; then
@@ -1717,14 +1740,6 @@ EOF
             log INFO "Applied custom sysctl parameters from configuration"
         fi
         
-        # Issue #21: users reported "FORTRESS sysctl config not found" after a
-        # run that claimed success. Confirm the write instead of assuming it.
-        if [[ ! -s "${sysctl_conf}" ]]; then
-            MODULE_ERROR_COUNT=$((MODULE_ERROR_COUNT + 1))
-            log ERROR "Failed to write ${sysctl_conf} - kernel hardening NOT applied"
-            return 1
-        fi
-
         execute_command "Applying kernel parameters" \
             "${SUDO} sysctl -p ${sysctl_conf} 2>/dev/null || true"
 
@@ -1886,6 +1901,7 @@ usercheck = 1
 # Enforce for root too
 enforce_for_root
 EOF
+        check_write "${pwquality_conf}" || return 1
         
         log SUCCESS "Password policy configured"
     else
@@ -1992,6 +2008,7 @@ module_audit() {
 # Make configuration immutable (requires reboot to change)
 -e 2
 EOF
+        check_write "${audit_rules}" || return 1
         
         execute_command "Loading audit rules" \
             "${SUDO} augenrules --load"
@@ -2059,6 +2076,7 @@ APT::Periodic::Download-Upgradeable-Packages "1";
 APT::Periodic::AutocleanInterval "7";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
+        check_write "${auto_upgrades}" || return 1
         
         # Configure unattended upgrades
         ${SUDO} tee "${unattended_conf}" > /dev/null << EOF
@@ -2075,6 +2093,7 @@ Unattended-Upgrade::Remove-Unused-Dependencies "true";
 Unattended-Upgrade::Automatic-Reboot "${auto_reboot}";
 Unattended-Upgrade::Automatic-Reboot-Time "${reboot_time}";
 EOF
+        check_write "${unattended_conf}" || return 1
         
         execute_command "Enabling automatic updates" \
             "${SUDO} systemctl enable unattended-upgrades && ${SUDO} systemctl start unattended-upgrades"
@@ -2662,6 +2681,7 @@ SUBSYSTEM=="usb", ATTRS{bDeviceClass}=="08", OPTIONS+="ignore_device"
 # Whitelist specific devices by vendor ID if needed:
 # SUBSYSTEM=="usb", ATTR{idVendor}=="1234", ATTR{idProduct}=="5678", MODE="0660"
 EOF
+        check_write "${udev_rule}" || return 1
 
         # Add allowed USB devices from config
         if [[ -n "${USB_ALLOWED_DEVICES:-}" ]]; then
@@ -2721,6 +2741,7 @@ install hfs /bin/true
 install hfsplus /bin/true
 install udf /bin/true
 EOF
+        check_write "${modprobe_conf}" || return 1
         
         log SUCCESS "Unused filesystems disabled"
     else
