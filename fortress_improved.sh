@@ -26,6 +26,8 @@
 # - FIXED: CLI flags not always overriding fortress.conf values.
 #          Replaced "compare to default" logic with explicit _SET flags.
 # - FIXED: Duplicate shebang in fix_library_permissions.sh.
+# - FIXED: secure_shared_memory added a duplicate fstab entry for /run/shm
+#          where it is a symlink to /dev/shm (Debian 12+, Ubuntu).
 # - ADDED: --scanner-mode flag for Nessus/OpenSCAP/CIS credential scans.
 # - ADDED: Configurable SSH options (TCP/agent fwd, MaxSessions, TTY, groups)
 #          to unblock compliance scanners without rolling back hardening.
@@ -1765,7 +1767,7 @@ module_secure_shared_memory() {
         "Shared memory can be exploited for privilege escalation and data exposure." \
         "" \
         "What we do:" \
-        "  • Mount /dev/shm and /run/shm with nosuid, nodev" \
+        "  • Mount /dev/shm (and /run/shm if it is a real directory) with nosuid, nodev" \
         "  • Conditionally apply noexec based on system type" \
         "" \
         "Why this matters:" \
@@ -1814,7 +1816,17 @@ module_secure_shared_memory() {
         
         # Add hardened shared memory mounts
         echo "tmpfs /dev/shm tmpfs ${mount_options} 0 0" | ${SUDO} tee -a "${fstab}" >/dev/null
-        echo "tmpfs /run/shm tmpfs ${mount_options} 0 0" | ${SUDO} tee -a "${fstab}" >/dev/null
+        # On current Debian and Ubuntu /run/shm is a symlink to /dev/shm, or
+        # does not exist at all. A second tmpfs entry for it then mounts over
+        # the symlink: findmnt --verify reports "target specified more than
+        # once" and "non-canonical target path", and at boot the mount unit
+        # either fails or stacks a second, empty tmpfs where software expects
+        # the real /dev/shm. Only a real directory gets its own entry.
+        if [[ -d /run/shm && ! -L /run/shm ]]; then
+            echo "tmpfs /run/shm tmpfs ${mount_options} 0 0" | ${SUDO} tee -a "${fstab}" >/dev/null
+        else
+            log INFO "/run/shm is a symlink to /dev/shm or absent - no separate fstab entry"
+        fi
         
         # Remount immediately
         execute_command "Remounting /dev/shm with security options" \
